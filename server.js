@@ -72,7 +72,7 @@ async function getSlots() {
 }
 
 // ── Book a slot — appends a new row to the AI test tab ───────────────────────
-async function bookSlot(writeTab, slot, name, contact, address, notes) {
+async function bookSlot(writeTab, slot, name, contact, address, callerName, notes) {
   const sheets = await getSheets();
   await sheets.spreadsheets.values.append({
     spreadsheetId: WH_SPREADSHEET_ID,
@@ -88,7 +88,7 @@ async function bookSlot(writeTab, slot, name, contact, address, notes) {
         "-",                   // E: No
         name,                  // F: Name
         contact,               // G: Contact
-        "-",                   // H: Serve By
+        callerName || "-",     // H: Serve By (WHB staff who handled the call)
         address || "-",        // I: Site Address
         "-",                   // J: City
         slot.time,             // K: Time
@@ -120,8 +120,12 @@ app.post("/chat", async (req, res) => {
     const area = detectArea(message);
     const today = new Date(Date.now() + 8 * 3600000).toISOString().split("T")[0];
 
-    const slotLines = slots.slice(0, 30).map(s =>
-      `${s.dateRaw} (${s.day}) ${s.time} — Technician: ${s.technician} [tab:${s.tab} row:${s.rowIndex}]`
+    // Cap each tab at 20 slots so both May and June are visible to the AI
+    const maySlots = slots.filter(s => s.tab.includes("May")).slice(0, 20);
+    const junSlots = slots.filter(s => s.tab.includes("Jun")).slice(0, 20);
+    const displaySlots = [...maySlots, ...junSlots];
+    const slotLines = displaySlots.map((s, idx) =>
+      `#${idx + 1}. ${s.dateRaw} (${s.day}) ${s.time} — Technician: ${s.technician} [tab:${s.tab} row:${s.rowIndex}]`
     ).join("\n") || "No available slots right now.";
 
     const system = `You are a scheduling assistant for Wai Hong Brothers (WHB), a waterproofing company in Malaysia.
@@ -134,21 +138,23 @@ LIVE AVAILABLE SLOTS (Google Sheets, real-time):
 ${slotLines}
 
 RULES:
-- Availability queries: list the nearest 5 slots with date, day, time, technician name.
+- Availability queries: list the nearest 5 slots with date, day, time, technician name. Include both May and June options if available.
 - Reply in the same language the user writes (Chinese or English).
 - Be concise and friendly. No corporate fluff.
 - Staff sends info piece-by-piece as they get it from the customer on the phone. That is normal — collect what's missing and ask for the rest.
-- To BOOK you need ALL 4 of these. Ask for any that are missing:
+- If a customer says a slot doesn't work, immediately suggest the NEXT slot from the list that has NOT been offered yet. Never repeat a slot that was already offered or declined.
+- To BOOK you need ALL 5 of these. Ask for any that are missing:
   (1) Which slot (date + time)
   (2) Customer name
   (3) Customer contact number
   (4) Customer site address
+  (5) Caller name (name of the WHB staff who is handling this call)
   Notes are optional — include them if provided.
-- Once you have all 4, confirm details and append this EXACT marker at the end of your reply:
-  [BOOK:tabName|rowIndex|customerName|customerContact|customerAddress|customerNotes]
-  Example: [BOOK:May 26|873|Ahmad Bin Ali|0123456789|No 5 Jalan Bukit, 52000 KL|Leaking roof]
-  Leave customerNotes empty if none: [...|customerAddress|]
-- After booking is confirmed, summarise: slot, technician, name, contact, address.`;
+- Once you have all 5, confirm details and append this EXACT marker at the end of your reply:
+  [BOOK:tabName|rowIndex|customerName|customerContact|customerAddress|callerName|customerNotes]
+  Example: [BOOK:AI Test May 26|873|Ahmad Bin Ali|0123456789|No 5 Jalan Bukit, 52000 KL|David|Leaking roof]
+  Leave customerNotes empty if none: [...|callerName|]
+- After booking is confirmed, summarise: slot, technician, name, contact, address, handled by.`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -168,17 +174,19 @@ RULES:
       "Jun 26": "AI Test Jun 26",
     };
 
-    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|\]]*)\|?([^\]]*)\]/);
+    // [BOOK:tab|row|customerName|customerContact|customerAddress|callerName|notes]
+    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|\]]*)\|?([^\]]*)\]/);
     if (match) {
-      const [, tab, rowStr, name, contact, address, notes] = match;
+      const [, tab, rowStr, name, contact, address, callerName, notes] = match;
       const rowIndex = parseInt(rowStr, 10);
       const slot = slots.find(s => s.tab === tab && s.rowIndex === rowIndex);
       const writeTab = TEST_TAB_MAP[tab] || tab; // always write to AI test tab
       try {
         if (!slot) throw new Error("Slot not found");
-        await bookSlot(writeTab, slot, name.trim(), contact.trim(), address.trim(), notes.trim());
+        await bookSlot(writeTab, slot, name.trim(), contact.trim(), address.trim(), callerName.trim(), notes.trim());
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
         reply += `\n\n✅ Booked!\n📅 ${slot.dateRaw} (${slot.day}) ${slot.time}\n👷 Technician: ${slot.technician}\n👤 ${name.trim()}\n📞 ${contact.trim()}\n📍 ${address.trim()}`;
+        if (callerName.trim()) reply += `\n🧑‍💼 Handled by: ${callerName.trim()}`;
         if (notes.trim()) reply += `\n📝 ${notes.trim()}`;
       } catch (e) {
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
