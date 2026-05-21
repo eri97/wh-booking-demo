@@ -138,13 +138,20 @@ RULES:
 
     let reply = completion.choices[0].message.content;
 
+    // Map real tabs → AI test tabs so demo bookings never touch real data
+    const TEST_TAB_MAP = {
+      "May 26": "AI Test May 26",
+      "Jun 26": "AI Test Jun 26",
+    };
+
     const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^\]]+)\]/);
     if (match) {
       const [, tab, rowStr, name, contact] = match;
       const rowIndex = parseInt(rowStr, 10);
       const slot = slots.find(s => s.tab === tab && s.rowIndex === rowIndex);
+      const writeTab = TEST_TAB_MAP[tab] || tab; // always write to AI test tab
       try {
-        await bookSlot(tab, rowIndex, name.trim(), contact.trim());
+        await bookSlot(writeTab, rowIndex, name.trim(), contact.trim());
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
         if (slot) reply += `\n\n✅ Confirmed! ${slot.dateRaw} (${slot.day}) ${slot.time}\nTechnician: ${slot.technician}`;
       } catch (e) {
