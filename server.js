@@ -51,11 +51,13 @@ async function getSlots() {
         const dateRaw    = (row[0] || "").trim();
         const day        = (row[1] || "").trim();
         const status     = (row[2] || "").trim();
+        const customerName = (row[5] || "").trim();
         const time       = (row[10] || "").replace(/\n/g, " ").trim();
         const technician = (row[12] || row[11] || "").trim();
         if (!dateRaw || !time) continue;
         if (!/^\d/.test(time)) continue; // time must start with digit (skip notes)
-        if (status !== "") continue; // already booked
+        if (status !== "") continue;      // already has a status = booked/confirmed
+        if (customerName !== "") continue; // already has a customer name = taken
         // Parse DD/MM/YYYY and skip past dates
         const parts = dateRaw.split("/");
         if (parts.length === 3) {
@@ -71,18 +73,17 @@ async function getSlots() {
   return slots;
 }
 
-// ── Book a slot — appends a new row to the AI test tab ───────────────────────
+// ── Book a slot — fills in the existing slot row in the AI test tab ──────────
 async function bookSlot(writeTab, slot, name, contact, address, callerName, notes) {
   const sheets = await getSheets();
-  await sheets.spreadsheets.values.append({
+  // Update columns C:I of the existing row (STATUS, SYSTEM CHECK, NO, NAME, CONTACT, SERVE BY, SITE ADDRESS)
+  // TIME and TECHNICIAN are already in the row — no need to overwrite them
+  await sheets.spreadsheets.values.update({
     spreadsheetId: WH_SPREADSHEET_ID,
-    range: `'${writeTab}'!A:M`,
+    range: `'${writeTab}'!C${slot.rowIndex}:I${slot.rowIndex}`,
     valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
     requestBody: {
       values: [[
-        slot.dateRaw,          // A: Date
-        slot.day,              // B: Day
         "Pending",             // C: Status
         notes || "-",          // D: System Check / Notes
         "-",                   // E: No
@@ -90,10 +91,6 @@ async function bookSlot(writeTab, slot, name, contact, address, callerName, note
         contact,               // G: Contact
         callerName || "-",     // H: Serve By (WHB staff who handled the call)
         address || "-",        // I: Site Address
-        "-",                   // J: City
-        slot.time,             // K: Time
-        "",                    // L: Distance
-        slot.technician,       // M: Technician
       ]],
     },
   });
