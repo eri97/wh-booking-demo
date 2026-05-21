@@ -161,4 +161,7 @@ RULES:
 });
 
 const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => console.log(`\n✅ WHB Booking Demo → http://localhost:${PORT}\n`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`\n✅ WHB Booking Demo → http://localhost:${PORT}\n`));
+}
+module.exports = app;
