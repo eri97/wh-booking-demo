@@ -71,14 +71,31 @@ async function getSlots() {
   return slots;
 }
 
-// ── Book a slot ───────────────────────────────────────────────────────────────
-async function bookSlot(tab, rowIndex, name, contact) {
+// ── Book a slot — appends a new row to the AI test tab ───────────────────────
+async function bookSlot(writeTab, slot, name, contact, address, notes) {
   const sheets = await getSheets();
-  await sheets.spreadsheets.values.update({
+  await sheets.spreadsheets.values.append({
     spreadsheetId: WH_SPREADSHEET_ID,
-    range: `'${tab}'!C${rowIndex}:G${rowIndex}`,
+    range: `'${writeTab}'!A:M`,
     valueInputOption: "USER_ENTERED",
-    requestBody: { values: [["Pending", "-", "-", name, contact]] },
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [[
+        slot.dateRaw,          // A: Date
+        slot.day,              // B: Day
+        "Pending",             // C: Status
+        notes || "-",          // D: System Check / Notes
+        "-",                   // E: No
+        name,                  // F: Name
+        contact,               // G: Contact
+        "-",                   // H: Serve By
+        address || "-",        // I: Site Address
+        "-",                   // J: City
+        slot.time,             // K: Time
+        "",                    // L: Distance
+        slot.technician,       // M: Technician
+      ]],
+    },
   });
 }
 
@@ -108,7 +125,7 @@ app.post("/chat", async (req, res) => {
     ).join("\n") || "No available slots right now.";
 
     const system = `You are a scheduling assistant for Wai Hong Brothers (WHB), a waterproofing company in Malaysia.
-You help the management team check appointment slots and make bookings via WhatsApp.
+You help the management team log bookings while they are on the phone with a customer.
 
 Today: ${today}
 Area from message: ${area}
@@ -119,12 +136,19 @@ ${slotLines}
 RULES:
 - Availability queries: list the nearest 5 slots with date, day, time, technician name.
 - Reply in the same language the user writes (Chinese or English).
-- Be concise and friendly, no corporate fluff.
-- To BOOK: you need (1) which slot, (2) customer name, (3) customer contact number. Ask if any are missing.
-- Once you have all 3, confirm and append this EXACT marker at the end of your reply:
-  [BOOK:tabName|rowIndex|customerName|customerContact]
-  Example: [BOOK:AI Test May 26|5|Ahmad Bin Ali|0123456789]
-- After the booking marker is processed, tell them it's confirmed in the system.`;
+- Be concise and friendly. No corporate fluff.
+- Staff sends info piece-by-piece as they get it from the customer on the phone. That is normal — collect what's missing and ask for the rest.
+- To BOOK you need ALL 4 of these. Ask for any that are missing:
+  (1) Which slot (date + time)
+  (2) Customer name
+  (3) Customer contact number
+  (4) Customer site address
+  Notes are optional — include them if provided.
+- Once you have all 4, confirm details and append this EXACT marker at the end of your reply:
+  [BOOK:tabName|rowIndex|customerName|customerContact|customerAddress|customerNotes]
+  Example: [BOOK:May 26|873|Ahmad Bin Ali|0123456789|No 5 Jalan Bukit, 52000 KL|Leaking roof]
+  Leave customerNotes empty if none: [...|customerAddress|]
+- After booking is confirmed, summarise: slot, technician, name, contact, address.`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -144,16 +168,18 @@ RULES:
       "Jun 26": "AI Test Jun 26",
     };
 
-    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^\]]+)\]/);
+    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|\]]*)\|?([^\]]*)\]/);
     if (match) {
-      const [, tab, rowStr, name, contact] = match;
+      const [, tab, rowStr, name, contact, address, notes] = match;
       const rowIndex = parseInt(rowStr, 10);
       const slot = slots.find(s => s.tab === tab && s.rowIndex === rowIndex);
       const writeTab = TEST_TAB_MAP[tab] || tab; // always write to AI test tab
       try {
-        await bookSlot(writeTab, rowIndex, name.trim(), contact.trim());
+        if (!slot) throw new Error("Slot not found");
+        await bookSlot(writeTab, slot, name.trim(), contact.trim(), address.trim(), notes.trim());
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
-        if (slot) reply += `\n\n✅ Confirmed! ${slot.dateRaw} (${slot.day}) ${slot.time}\nTechnician: ${slot.technician}`;
+        reply += `\n\n✅ Booked!\n📅 ${slot.dateRaw} (${slot.day}) ${slot.time}\n👷 Technician: ${slot.technician}\n👤 ${name.trim()}\n📞 ${contact.trim()}\n📍 ${address.trim()}`;
+        if (notes.trim()) reply += `\n📝 ${notes.trim()}`;
       } catch (e) {
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
         reply += "\n\n⚠️ Couldn't write to sheet — please check manually.";
