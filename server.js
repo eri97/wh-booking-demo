@@ -1,0 +1,164 @@
+const express = require("express");
+const OpenAI = require("openai");
+const { google } = require("googleapis");
+const { Pool } = require("pg");
+require("dotenv").config();
+
+const app = express();
+app.use(express.json());
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const WH_AGENT_ID = "83d02738-3649-4264-a571-0bedbe7d3884";
+const WH_SPREADSHEET_ID = "1AKsfGTvTvVW2XvsPPtUnHVOgJhXuNFjjGlz-r9gCMpw";
+const USE_TEST_TABS = process.env.WH_USE_TEST_TABS !== "false";
+
+// ── Google Sheets auth via OAuth tokens stored in DB ─────────────────────────
+async function getSheets() {
+  const res = await pool.query(
+    "SELECT google_access_token, google_refresh_token, google_token_expiry FROM google_sheets_connections WHERE agent_id = $1",
+    [WH_AGENT_ID]
+  );
+  const row = res.rows[0];
+  if (!row) throw new Error("No Google Sheets connection found for WHB agent");
+
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_SHEETS_CLIENT_ID,
+    process.env.GOOGLE_SHEETS_CLIENT_SECRET
+  );
+  auth.setCredentials({
+    access_token: row.google_access_token,
+    refresh_token: row.google_refresh_token,
+    expiry_date: row.google_token_expiry ? new Date(row.google_token_expiry).getTime() : undefined,
+  });
+  return google.sheets({ version: "v4", auth });
+}
+
+// ── Read available slots ──────────────────────────────────────────────────────
+async function getSlots() {
+  const sheets = await getSheets();
+  const tabs = USE_TEST_TABS ? ["AI Test May 26", "AI Test Jun 26"] : ["May 26", "Jun 26"];
+  const slots = [];
+  for (const tab of tabs) {
+    try {
+      const resp = await sheets.spreadsheets.values.get({
+        spreadsheetId: WH_SPREADSHEET_ID,
+        range: `'${tab}'!A:N`,
+      });
+      const rows = resp.data.values || [];
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const dateRaw    = (row[0] || "").trim();
+        const day        = (row[1] || "").trim();
+        const status     = (row[2] || "").trim();
+        const time       = (row[10] || "").replace(/\n/g, " ").trim();
+        const technician = (row[12] || row[11] || "").trim();
+        if (!dateRaw || !time) continue;
+        if (!/^\d/.test(time)) continue; // time must start with digit (skip notes)
+        if (status !== "") continue; // already booked
+        // Parse DD/MM/YYYY and skip past dates
+        const parts = dateRaw.split("/");
+        if (parts.length === 3) {
+          const slotDate = new Date(`${parts[2]}-${parts[1].padStart(2,"0")}-${parts[0].padStart(2,"0")}`);
+          const todayMYT = new Date(Date.now() + 8 * 3600000);
+          todayMYT.setUTCHours(0,0,0,0);
+          if (slotDate < todayMYT) continue;
+        }
+        slots.push({ tab, rowIndex: i + 1, dateRaw, day, time, technician });
+      }
+    } catch { /* tab may not exist */ }
+  }
+  return slots;
+}
+
+// ── Book a slot ───────────────────────────────────────────────────────────────
+async function bookSlot(tab, rowIndex, name, contact) {
+  const sheets = await getSheets();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: WH_SPREADSHEET_ID,
+    range: `'${tab}'!C${rowIndex}:G${rowIndex}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [["Pending", "-", "-", name, contact]] },
+  });
+}
+
+// ── Area detection ────────────────────────────────────────────────────────────
+function detectArea(msg) {
+  const m = msg.toLowerCase();
+  if (/johor|jb|johor bahru|skudai/.test(m)) return "Johor team";
+  if (/penang|ipoh|perak|kedah/.test(m)) return "Northern team";
+  if (/kuantan|pahang/.test(m)) return "Kuantan team";
+  if (/sabah|sarawak|kota kinabalu|kuching/.test(m)) return "East Malaysia (no service coverage)";
+  return "HQ team (KL / Selangor / Klang Valley)";
+}
+
+// ── Serve UI ──────────────────────────────────────────────────────────────────
+app.get("/", (_req, res) => res.sendFile(__dirname + "/index.html"));
+
+// ── Chat endpoint ─────────────────────────────────────────────────────────────
+app.post("/chat", async (req, res) => {
+  const { message, history = [] } = req.body;
+  try {
+    const [slots] = await Promise.all([getSlots()]);
+    const area = detectArea(message);
+    const today = new Date(Date.now() + 8 * 3600000).toISOString().split("T")[0];
+
+    const slotLines = slots.slice(0, 30).map(s =>
+      `${s.dateRaw} (${s.day}) ${s.time} — Technician: ${s.technician} [tab:${s.tab} row:${s.rowIndex}]`
+    ).join("\n") || "No available slots right now.";
+
+    const system = `You are a scheduling assistant for Wai Hong Brothers (WHB), a waterproofing company in Malaysia.
+You help the management team check appointment slots and make bookings via WhatsApp.
+
+Today: ${today}
+Area from message: ${area}
+
+LIVE AVAILABLE SLOTS (Google Sheets, real-time):
+${slotLines}
+
+RULES:
+- Availability queries: list the nearest 5 slots with date, day, time, technician name.
+- Reply in the same language the user writes (Chinese or English).
+- Be concise and friendly, no corporate fluff.
+- To BOOK: you need (1) which slot, (2) customer name, (3) customer contact number. Ask if any are missing.
+- Once you have all 3, confirm and append this EXACT marker at the end of your reply:
+  [BOOK:tabName|rowIndex|customerName|customerContact]
+  Example: [BOOK:AI Test May 26|5|Ahmad Bin Ali|0123456789]
+- After the booking marker is processed, tell them it's confirmed in the system.`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [
+        { role: "system", content: system },
+        ...history,
+        { role: "user", content: message },
+      ],
+    });
+
+    let reply = completion.choices[0].message.content;
+
+    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^\]]+)\]/);
+    if (match) {
+      const [, tab, rowStr, name, contact] = match;
+      const rowIndex = parseInt(rowStr, 10);
+      const slot = slots.find(s => s.tab === tab && s.rowIndex === rowIndex);
+      try {
+        await bookSlot(tab, rowIndex, name.trim(), contact.trim());
+        reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
+        if (slot) reply += `\n\n✅ Confirmed! ${slot.dateRaw} (${slot.day}) ${slot.time}\nTechnician: ${slot.technician}`;
+      } catch (e) {
+        reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
+        reply += "\n\n⚠️ Couldn't write to sheet — please check manually.";
+      }
+    }
+
+    res.json({ reply });
+  } catch (err) {
+    console.error("[WHB Demo]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3002;
+app.listen(PORT, () => console.log(`\n✅ WHB Booking Demo → http://localhost:${PORT}\n`));
