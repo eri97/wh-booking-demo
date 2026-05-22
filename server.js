@@ -58,7 +58,6 @@ async function getSlots() {
         if (!/^\d/.test(time)) continue;   // time must start with digit (skip notes)
         if (status !== "") continue;       // already has a status = booked/confirmed
         if (customerName !== "") continue; // already has a customer name = taken
-        if (technician.length <= 1) continue; // skip slots with unnamed/single-initial technicians
         // Parse DD/MM/YYYY and skip past dates
         const parts = dateRaw.split("/");
         if (parts.length === 3) {
@@ -136,11 +135,12 @@ LIVE AVAILABLE SLOTS (Google Sheets, real-time):
 ${slotLines}
 
 RULES:
-- Availability queries: list the nearest 5 slots with date, day, time, technician name. Include both May and June options if available.
+- Availability queries: always show the 5 chronologically nearest slots from the list above — start from #1 and work forward. Never skip earlier slots to show later ones. The list is already sorted earliest-first.
+- If the customer asks for a specific date (e.g. "26th", "May 26"), filter the list to slots on that date only.
+- If a customer says a slot doesn't work, suggest the very next slot (#N+1) from the list that has NOT been offered yet. Never repeat a declined slot.
 - Reply in the same language the user writes (Chinese or English).
 - Be concise and friendly. No corporate fluff.
 - Staff sends info piece-by-piece as they get it from the customer on the phone. That is normal — collect what's missing and ask for the rest.
-- If a customer says a slot doesn't work, immediately suggest the NEXT slot from the list that has NOT been offered yet. Never repeat a slot that was already offered or declined.
 - To BOOK you need ALL 5 of these. Ask for any that are missing:
   (1) Which slot (date + time)
   (2) Customer name
