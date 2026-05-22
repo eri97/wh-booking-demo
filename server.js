@@ -74,13 +74,12 @@ async function getSlots() {
 }
 
 // ── Book a slot — fills in the existing slot row in the AI test tab ──────────
-async function bookSlot(writeTab, slot, name, contact, address, callerName, notes) {
+async function bookSlot(writeTab, slot, name, contact, address, callerName, city, notes) {
   const sheets = await getSheets();
-  // Update columns C:I of the existing row (STATUS, SYSTEM CHECK, NO, NAME, CONTACT, SERVE BY, SITE ADDRESS)
-  // TIME and TECHNICIAN are already in the row — no need to overwrite them
+  // Update columns C:J of the existing row
   await sheets.spreadsheets.values.update({
     spreadsheetId: WH_SPREADSHEET_ID,
-    range: `'${writeTab}'!C${slot.rowIndex}:I${slot.rowIndex}`,
+    range: `'${writeTab}'!C${slot.rowIndex}:J${slot.rowIndex}`,
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: [[
@@ -89,8 +88,9 @@ async function bookSlot(writeTab, slot, name, contact, address, callerName, note
         "-",                   // E: No
         name,                  // F: Name
         contact,               // G: Contact
-        callerName || "-",     // H: Serve By (WHB staff who handled the call)
+        callerName || "-",     // H: Serve By
         address || "-",        // I: Site Address
+        city || "-",           // J: City
       ]],
     },
   });
@@ -148,9 +148,10 @@ RULES:
   (5) Caller name (name of the WHB staff who is handling this call)
   Notes are optional — include them if provided.
 - Once you have all 5, confirm details and append this EXACT marker at the end of your reply:
-  [BOOK:tabName|rowIndex|customerName|customerContact|customerAddress|callerName|customerNotes]
-  Example: [BOOK:AI Test May 26|873|Ahmad Bin Ali|0123456789|No 5 Jalan Bukit, 52000 KL|David|Leaking roof]
-  Leave customerNotes empty if none: [...|callerName|]
+  [BOOK:tabName|rowIndex|customerName|customerContact|customerAddress|callerName|city|customerNotes]
+  Extract city from the site address (e.g. Shah Alam, Petaling Jaya, Klang, Puchong, Cheras, Subang Jaya, Ampang, Kuala Lumpur, Setia Alam, Banting, etc). Leave blank if cannot determine.
+  Example: [BOOK:AI Test May 26|873|Ahmad Bin Ali|0123456789|No 5 Jalan Bukit, 52000 KL|David|Kuala Lumpur|Leaking roof]
+  Leave customerNotes empty if none: [...|city|]
 - After booking is confirmed, summarise: slot, technician, name, contact, address, handled by.`;
 
     const completion = await openai.chat.completions.create({
@@ -171,18 +172,18 @@ RULES:
       "Jun 26": "AI Test Jun 26",
     };
 
-    // [BOOK:tab|row|customerName|customerContact|customerAddress|callerName|notes]
-    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|\]]*)\|?([^\]]*)\]/);
+    // [BOOK:tab|row|customerName|customerContact|customerAddress|callerName|city|notes]
+    const match = reply.match(/\[BOOK:([^|]+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]*)\|([^||\]]*)\|?([^\]]*)\]/);
     if (match) {
-      const [, tab, rowStr, name, contact, address, callerName, notes] = match;
+      const [, tab, rowStr, name, contact, address, callerName, city, notes] = match;
       const rowIndex = parseInt(rowStr, 10);
       const slot = slots.find(s => s.tab === tab && s.rowIndex === rowIndex);
       const writeTab = TEST_TAB_MAP[tab] || tab; // always write to AI test tab
       try {
         if (!slot) throw new Error("Slot not found");
-        await bookSlot(writeTab, slot, name.trim(), contact.trim(), address.trim(), callerName.trim(), notes.trim());
+        await bookSlot(writeTab, slot, name.trim(), contact.trim(), address.trim(), callerName.trim(), city.trim(), notes.trim());
         reply = reply.replace(/\[BOOK:[^\]]+\]/, "").trim();
-        reply += `\n\n✅ Booked!\n📅 ${slot.dateRaw} (${slot.day}) ${slot.time}\n👷 Technician: ${slot.technician}\n👤 ${name.trim()}\n📞 ${contact.trim()}\n📍 ${address.trim()}`;
+        reply += `\n\n✅ Booked!\n📅 ${slot.dateRaw} (${slot.day}) ${slot.time}\n👷 Technician: ${slot.technician}\n👤 ${name.trim()}\n📞 ${contact.trim()}\n📍 ${address.trim()}${city.trim() ? `, ${city.trim()}` : ""}`;
         if (callerName.trim()) reply += `\n🧑‍💼 Handled by: ${callerName.trim()}`;
         if (notes.trim()) reply += `\n📝 ${notes.trim()}`;
       } catch (e) {
