@@ -46,18 +46,38 @@ async function getSlots() {
         range: `'${tab}'!A:N`,
       });
       const rows = resp.data.values || [];
+
+      // Build tech+date → city map from confirmed bookings (for counter-slot inference)
+      const techCityMap = {};
+      for (const r of rows) {
+        const status = (r[2] || "").trim();
+        const city   = (r[9] || "").trim();
+        const tech   = (r[12] || r[11] || "").trim();
+        const date   = (r[0] || "").trim();
+        if (status && city && tech && date) {
+          techCityMap[`${tech}|${date}`] = city;
+        }
+      }
+
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        const dateRaw    = (row[0] || "").trim();
-        const day        = (row[1] || "").trim();
-        const status     = (row[2] || "").trim();
-        const customerName = (row[5] || "").trim();
-        const time       = (row[10] || "").replace(/\n/g, " ").trim();
-        const technician = (row[12] || row[11] || "").trim();
+        const dateRaw      = (row[0]  || "").trim();
+        const day          = (row[1]  || "").trim();
+        const status       = (row[2]  || "").trim();
+        const customerName = (row[5]  || "").trim();
+        const contact      = (row[6]  || "").trim();
+        const servedBy     = (row[7]  || "").trim();
+        const siteAddress  = (row[8]  || "").trim();
+        const slotCity     = (row[9]  || "").trim();
+        const time         = (row[10] || "").replace(/\n/g, " ").trim();
+        const technician   = (row[12] || row[11] || "").trim();
         if (!dateRaw || !time) continue;
-        if (!/^\d/.test(time)) continue;   // time must start with digit (skip notes)
-        if (status !== "") continue;       // already has a status = booked/confirmed
-        if (customerName !== "") continue; // already has a customer name = taken
+        if (!/^\d/.test(time)) continue;    // time must start with digit (skip notes)
+        if (status !== "") continue;        // has a status = booked/confirmed
+        if (customerName !== "") continue;  // has a customer name = taken
+        if (contact !== "") continue;       // has a contact number = taken
+        if (servedBy !== "" && servedBy !== "-") continue;   // already handled = taken
+        if (siteAddress !== "" && siteAddress !== "-") continue; // address filled = taken
         // Parse DD/MM/YYYY and skip past dates
         const parts = dateRaw.split("/");
         if (parts.length === 3) {
@@ -66,7 +86,9 @@ async function getSlots() {
           todayMYT.setUTCHours(0,0,0,0);
           if (slotDate < todayMYT) continue;
         }
-        slots.push({ tab, rowIndex: i + 1, dateRaw, day, time, technician });
+        // Infer city: use pre-filled city, or infer from same-tech confirmed booking on same day
+        const city = slotCity || techCityMap[`${technician}|${dateRaw}`] || "";
+        slots.push({ tab, rowIndex: i + 1, dateRaw, day, time, technician, city });
       }
     } catch { /* tab may not exist */ }
   }
@@ -122,7 +144,7 @@ app.post("/chat", async (req, res) => {
     const junSlots = slots.filter(s => s.tab.includes("Jun")).slice(0, 20);
     const displaySlots = [...maySlots, ...junSlots];
     const slotLines = displaySlots.map((s, idx) =>
-      `#${idx + 1}. ${s.dateRaw} (${s.day}) ${s.time} — Technician: ${s.technician} [tab:${s.tab} row:${s.rowIndex}]`
+      `#${idx + 1}. ${s.dateRaw} (${s.day}) ${s.time} — Technician: ${s.technician} — Area: ${s.city || "any"} [tab:${s.tab} row:${s.rowIndex}]`
     ).join("\n") || "No available slots right now.";
 
     const system = `You are a scheduling assistant for Wai Hong Brothers (WHB), a waterproofing company in Malaysia.
@@ -137,8 +159,9 @@ ${slotLines}
 RULES:
 - The [tab:... row:...] markers in the slot list are INTERNAL ONLY. NEVER show them to the user. Strip them completely from any reply.
 - Availability queries: always show the 5 chronologically nearest slots — start from #1 and work forward. The list is already sorted earliest-first.
-- If the customer asks for a specific date (e.g. "23rd", "tomorrow") and NO slots exist for that date, do NOT just say "no slots" and ask what other date they want. Instead, immediately show the 5 nearest available slots from the full list so they can pick without asking again.
+- If the customer asks for a specific date and NO slots exist for that date, immediately show the 5 nearest available slots from the full list — do not ask them to name another date.
 - If a customer says a slot doesn't work, suggest the very next slot (#N+1) that has NOT been offered yet. Never repeat a declined slot.
+- AREA FILTERING: Each slot has "Area: X" or "Area: any". If the customer mentions a specific area or city (e.g. Ampang, Klang, Shah Alam), FIRST show slots where Area matches, then fill remaining slots with "Area: any" slots. Never show a slot whose Area is a different city than what the customer asked for.
 - Reply in the same language the user writes (Chinese or English).
 - Be concise and friendly. No corporate fluff. Do NOT list all required booking fields upfront — collect them naturally one at a time as the conversation progresses.
 - Staff sends info piece-by-piece as they get it from the customer on the phone. That is normal — collect what's missing and ask for the rest.
