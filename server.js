@@ -55,9 +55,10 @@ async function getSlots() {
         const time       = (row[10] || "").replace(/\n/g, " ").trim();
         const technician = (row[12] || row[11] || "").trim();
         if (!dateRaw || !time) continue;
-        if (!/^\d/.test(time)) continue; // time must start with digit (skip notes)
-        if (status !== "") continue;      // already has a status = booked/confirmed
+        if (!/^\d/.test(time)) continue;   // time must start with digit (skip notes)
+        if (status !== "") continue;       // already has a status = booked/confirmed
         if (customerName !== "") continue; // already has a customer name = taken
+        if (technician.length <= 1) continue; // skip slots with unnamed/single-initial technicians
         // Parse DD/MM/YYYY and skip past dates
         const parts = dateRaw.split("/");
         if (parts.length === 3) {
